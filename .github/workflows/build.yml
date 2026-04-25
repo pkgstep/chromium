@@ -1,0 +1,78 @@
+name: Build
+run-name: Build ${{ github.event.repository.name }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            name: amd64
+          - runner: ubuntu-24.04-arm
+            name: arm64
+    runs-on: ${{ matrix.runner }}
+    container: debian:12
+    name: Build ${{ github.event.repository.name }} (${{ matrix.name }})
+    steps:
+      - name: Install prerequisites
+        run: |
+          set -e
+          apt-get update
+          apt-get install -y sudo git ca-certificates wget curl jq squashfs-tools
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Bootstrap Gershwin developer environment
+        run: |
+          set -e
+          git clone https://github.com/gershwin-desktop/gershwin-developer.git /Developer
+          /Developer/Library/Scripts/Bootstrap.sh
+          /Developer/Library/Scripts/Checkout.sh
+          cd /Developer && make install
+
+      - name: Build and package ${{ github.event.repository.name }}
+        shell: bash
+        run: |
+          set -e
+          . /System/Library/Makefiles/GNUstep.sh
+          cd "$GITHUB_WORKSPACE"
+          pkgwrap "${{ github.event.repository.name }}"
+
+      - name: Upload .squashfs to continuous release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCH: ${{ matrix.name }}
+        run: |
+          set -e
+          shopt -s nullglob
+          pkgs=( /root/*.squashfs /github/home/*.squashfs )
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "No .squashfs file found" >&2
+            exit 1
+          fi
+          renamed=()
+          for p in "${pkgs[@]}"; do
+            dir=$(dirname "$p")
+            base=$(basename "$p" .squashfs)
+            if [[ "$base" == *-"$ARCH" ]]; then
+              renamed+=( "$p" )
+            else
+              new="$dir/${base}-${ARCH}.squashfs"
+              mv "$p" "$new"
+              renamed+=( "$new" )
+            fi
+          done
+          ls -lh "${renamed[@]}"
+          wget -c https://github.com/probonopd/uploadtool/raw/master/upload.sh
+          bash upload.sh "${renamed[@]}"
